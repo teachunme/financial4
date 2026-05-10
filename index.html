@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>年度財務趨勢 App</title>
+    <link rel="manifest" href="manifest.json">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root { --primary: #2d3436; --accent: #0984e3; --bg: #f0f2f5; --success: #00b894; }
+        body { font-family: -apple-system, sans-serif; background: var(--bg); margin: 0; padding: 15px; color: var(--primary); }
+        .card { background: white; border-radius: 15px; padding: 15px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); margin-bottom: 15px; }
+        .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 15px; }
+        .box { background: var(--primary); color: white; padding: 10px; border-radius: 10px; text-align: center; }
+        .box.net { background: var(--success); }
+        .val { display: block; font-weight: bold; font-size: 0.9rem; margin-top: 5px; }
+        .month-bar { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 10px; margin-bottom: 10px; -webkit-overflow-scrolling: touch; }
+        .m-btn { padding: 8px 18px; border: none; background: white; border-radius: 20px; white-space: nowrap; box-shadow: 0 2px 4px rgba(0,0,0,0.05); cursor: pointer; }
+        .m-btn.active { background: var(--accent); color: white; }
+        table { width: 100%; border-collapse: collapse; }
+        td { padding: 12px 0; border-bottom: 1px solid #f1f1f1; }
+        input { width: 110px; border: 1px solid #ddd; padding: 8px; border-radius: 6px; text-align: right; font-size: 1rem; color: var(--accent); }
+        .btn-row { display: flex; gap: 10px; margin-bottom: 15px; position: sticky; top: 0; z-index: 100; background: var(--bg); padding: 5px 0; }
+        .btn { flex: 1; padding: 12px; border: none; border-radius: 10px; color: white; font-weight: bold; font-size: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .btn-save { background: var(--accent); }
+        .btn-export { background: #6c5ce7; }
+        h3 { margin: 0 0 10px 0; font-size: 1.1rem; border-left: 4px solid var(--accent); padding-left: 10px; }
+    </style>
+</head>
+<body>
+
+<div class="btn-row">
+    <button class="btn btn-save" onclick="saveData()">💾 鎖定並儲存</button>
+    <button class="btn btn-export" onclick="exportCSV()">📥 下載備份</button>
+</div>
+
+<div id="monthSelector" class="month-bar"></div>
+
+<div class="grid">
+    <div class="box">總資產<span id="sumA" class="val">0</span></div>
+    <div class="box">總負債<span id="sumL" class="val">0</span></div>
+    <div class="box net">淨資產<span id="sumN" class="val">0</span></div>
+</div>
+
+<div class="card">
+    <h3>年度資產趨勢</h3>
+    <canvas id="trendChart" style="width:100%; height:180px;"></canvas>
+</div>
+
+<div class="card">
+    <h3>當月資產負債比</h3>
+    <canvas id="pieChart" style="width:100%; height:180px;"></canvas>
+</div>
+
+<div class="card">
+    <h3 style="border-left-color: var(--success)">資產明細 (Assets)</h3>
+    <table id="assetTable"></table>
+</div>
+
+<div class="card">
+    <h3 style="border-left-color: #d63031">負債支出 (Liabilities)</h3>
+    <table id="liabilityTable"></table>
+</div>
+
+<script>
+    let curM = 1;
+    let storageKey = 'FINAL_FINANCE_DB_V1';
+    let db = JSON.parse(localStorage.getItem(storageKey)) || {};
+    const assetNames = ["銀行存款", "股票基金", "不動產", "外幣", "其他1", "其他2"];
+    const liabNames = ["房貸", "信貸", "車貸", "各項稅金", "保險支出", "生活支出"];
+    let pieChart, trendChart;
+
+    function init() {
+        const bar = document.getElementById('monthSelector');
+        for(let i=1; i<=12; i++) {
+            bar.innerHTML += `<button class="m-btn ${i==1?'active':''}" id="btn-${i}" onclick="changeMonth(${i})">${i}月</button>`;
+        }
+        makeTable('assetTable', assetNames, 'a-in');
+        makeTable('liabilityTable', liabNames, 'l-in');
+        setupCharts();
+        loadData();
+    }
+
+    function makeTable(id, list, cls) {
+        const t = document.getElementById(id);
+        list.forEach(item => {
+            t.innerHTML += `<tr><td>${item}</td><td><input type="number" class="${cls}" data-name="${item}" oninput="calc()"></td></tr>`;
+        });
+    }
+
+    function setupCharts() {
+        // 圓餅圖
+        pieChart = new Chart(document.getElementById('pieChart'), {
+            type: 'doughnut',
+            data: { labels: ['資產', '負債'], datasets: [{ backgroundColor: ['#00b894','#d63031'], data: [0, 0] }] },
+            options: { plugins: { legend: { position: 'bottom' } } }
+        });
+        // 折線圖 (趨勢圖)
+        trendChart = new Chart(document.getElementById('trendChart'), {
+            type: 'line',
+            data: { 
+                labels: ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'],
+                datasets: [{ 
+                    label: '每月淨資產趨勢',
+                    borderColor: '#0984e3',
+                    backgroundColor: 'rgba(9, 132, 227, 0.1)',
+                    data: new Array(12).fill(0),
+                    fill: true,
+                    tension: 0.3
+                }]
+            },
+            options: { scales: { y: { beginAtZero: false } }, plugins: { legend: { display: false } } }
+        });
+    }
+
+    function calc() {
+        let a = 0, l = 0;
+        document.querySelectorAll('.a-in').forEach(i => a += Number(i.value||0));
+        document.querySelectorAll('.l-in').forEach(i => l += Number(i.value||0));
+        document.getElementById('sumA').innerText = a.toLocaleString();
+        document.getElementById('sumL').innerText = l.toLocaleString();
+        document.getElementById('sumN').innerText = (a-l).toLocaleString();
+        
+        // 更新當月比例圖
+        pieChart.data.datasets[0].data = [a, l];
+        pieChart.update();
+
+        // 暫存當前月份數據到記憶體並更新趨勢圖
+        tempSave();
+        updateTrend();
+    }
+
+    function updateTrend() {
+        let trendData = [];
+        for(let i=1; i<=12; i++) {
+            let mData = db[i] || {};
+            let mA = 0, mL = 0;
+            assetNames.forEach(n => mA += Number(mData[n] || 0));
+            liabNames.forEach(n => mL += Number(mData[n] || 0));
+            trendData.push(mA - mL);
+        }
+        trendChart.data.datasets[0].data = trendData;
+        trendChart.update();
+    }
+
+    function changeMonth(m) {
+        tempSave(); // 切換前先暫存
+        curM = m;
+        document.querySelectorAll('.m-btn').forEach(b => b.classList.remove('active'));
+        document.getElementById('btn-'+m).classList.add('active');
+        loadData();
+    }
+
+    function tempSave() {
+        let data = {};
+        document.querySelectorAll('input').forEach(i => data[i.dataset.name] = i.value);
+        db[curM] = data;
+    }
+
+    function loadData() {
+        let data = db[curM] || {};
+        document.querySelectorAll('input').forEach(i => i.value = data[i.dataset.name] || "");
+        calc();
+    }
+
+    function saveData() {
+        tempSave();
+        localStorage.setItem(storageKey, JSON.stringify(db));
+        alert('✅ 12個月份資料已成功存入手機庫存！');
+    }
+
+    function exportCSV() {
+        let csv = "\ufeff月份,項目,金額\n";
+        Object.keys(db).forEach(m => {
+            Object.keys(db[m]).forEach(k => csv += `${m}月,${k},${db[m][k]}\n`);
+        });
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = '年度財務報表備份.csv';
+        a.click();
+    }
+
+    window.onload = init;
+</script>
+</body>
+</html>
